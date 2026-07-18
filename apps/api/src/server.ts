@@ -11,6 +11,8 @@ import { registerAuthRoutes } from "./routes/auth.js";
 import { registerTwitchUserRoutes } from "./routes/twitch-users.js";
 import { registerChannelRoutes } from "./routes/channels.js";
 import { registerEventSubRoutes } from "./eventsub/routes.js";
+import { registerChatterRoutes } from "./routes/chatters.js";
+import type { ProfileService } from "./services/profile.js";
 
 export const API_VERSION = "0.1.0";
 
@@ -25,6 +27,7 @@ export type ServerDeps = {
   fetchImpl: FetchLike;
   getAppUser: (id: string) => Promise<AppUser | null>;
   ingestor: ChatIngestor | null;
+  profiles: ProfileService | null;
 };
 
 export function buildDefaultGetAppUser(pool: PostgresPool | null) {
@@ -120,10 +123,50 @@ const LANDING_PAGE = `<!doctype html>
           (u.profileImageUrl ? '<img src="' + u.profileImageUrl + '" width="48" style="border-radius:50%;float:left;margin-right:0.75rem">' : "") +
           "<b>" + u.displayName.replace(/[<>&]/g, "") + "</b> (" + u.login.replace(/[<>&]/g, "") + ")<br>" +
           "ID " + u.twitchUserId + " \\u00b7 created " + (u.accountCreatedAt || "unknown").slice(0, 10) +
-          "<br><span style='color:#66666e'>source: " + data.source + "</span></div>";
+          "<br><span style='color:#66666e'>source: " + data.source + "</span><br>" +
+          "<a href='#' style='color:#a970ff' onclick='loadProfile(\\"" + u.twitchUserId + "\\");return false'>View profile \\u2192</a></div>" +
+          "<div id='profile'></div>";
       })
       .catch(function () { out.textContent = "Lookup failed."; });
   });
+
+  window.loadProfile = function (id) {
+    var out = document.getElementById("profile");
+    out.textContent = "Loading profile\\u2026";
+    Promise.all([
+      fetch("/v1/chatters/" + id + "/profile").then(function (r) { return r.json(); }),
+      fetch("/v1/chatters/" + id + "/messages?limit=10").then(function (r) { return r.json(); })
+    ]).then(function (results) {
+      var p = results[0], msgs = results[1];
+      function esc(s) { return String(s == null ? "" : s).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;"); }
+      var html = "<div style='text-align:left;margin-top:1rem'>";
+      html += "<p><b>" + p.summary.messagesObserved + "</b> messages across <b>" +
+        p.summary.channelsObserved + "</b> channel(s)" +
+        (p.summary.firstObservedAt ? " \\u00b7 first seen " + esc(p.summary.firstObservedAt.slice(0, 10)) : "") + "</p>";
+      if (p.roles.length) {
+        html += "<table style='border-collapse:collapse;font-size:0.85rem'><tr><th style='text-align:left;padding:0.2rem 0.6rem'>Channel</th><th style='text-align:left;padding:0.2rem 0.6rem'>Role</th><th style='text-align:left;padding:0.2rem 0.6rem'>Status</th><th style='text-align:left;padding:0.2rem 0.6rem'>Last seen</th><th style='text-align:left;padding:0.2rem 0.6rem'>Evidence</th></tr>";
+        p.roles.forEach(function (r) {
+          html += "<tr><td style='padding:0.2rem 0.6rem'>" + esc(r.channel.login || r.channel.twitchChannelId) +
+            "</td><td style='padding:0.2rem 0.6rem'>" + esc(r.role) +
+            "</td><td style='padding:0.2rem 0.6rem'>" + esc(r.status) + " [" + esc(r.source) + "]" +
+            "</td><td style='padding:0.2rem 0.6rem'>" + esc((r.lastObservedAt || "").slice(0, 10)) +
+            "</td><td style='padding:0.2rem 0.6rem'>" + r.evidenceCount + "</td></tr>";
+        });
+        html += "</table>";
+      } else { html += "<p style='color:#adadb8'>No role observations yet.</p>"; }
+      if (msgs.messages && msgs.messages.length) {
+        html += "<p style='margin-bottom:0.25rem'><b>Recent messages</b> (authorized channels only)</p>";
+        msgs.messages.forEach(function (m) {
+          html += "<div style='font-size:0.85rem;color:#adadb8'>[" + esc(m.sentAt.slice(0, 16).replace("T", " ")) +
+            " \\u00b7 " + esc(m.channelLogin || m.twitchChannelId) + "] " + esc(m.messageText) + "</div>";
+        });
+      }
+      p.warnings.forEach(function (w) {
+        html += "<p style='color:#66666e;font-size:0.75rem'>\\u26a0 " + esc(w.message) + "</p>";
+      });
+      out.innerHTML = html + "</div>";
+    }).catch(function () { out.textContent = "Profile load failed."; });
+  };
 
   document.getElementById("connectBtn").addEventListener("click", function () {
     var out = document.getElementById("connectResult");
@@ -171,6 +214,7 @@ export function buildServer(deps: ServerDeps): FastifyInstance {
   registerTwitchUserRoutes(app, deps);
   registerChannelRoutes(app, deps);
   registerEventSubRoutes(app, deps);
+  registerChatterRoutes(app, deps);
 
   return app;
 }

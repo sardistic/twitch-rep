@@ -36,6 +36,7 @@ function buildDeps(overrides: Partial<ServerDeps> = {}): ServerDeps {
     fetchImpl: fetch,
     getAppUser: async () => null,
     ingestor: null,
+    profiles: null,
     ...overrides,
   };
 }

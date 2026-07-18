@@ -1,5 +1,7 @@
 import { createClient, type ClickHouseClient } from "@clickhouse/client";
 
+export * from "./queries.js";
+
 export type { ClickHouseClient };
 
 export type ClickHouseConfig = {

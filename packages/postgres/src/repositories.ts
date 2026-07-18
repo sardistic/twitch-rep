@@ -319,6 +319,70 @@ export async function listOrganizationChannels(
   }));
 }
 
+export type VerifiedAssertionRow = {
+  twitchChannelId: string;
+  roleName: string;
+  source: "twitch_api" | "twitch_eventsub" | "manual";
+  verifiedAt: Date;
+  endedAt: Date | null;
+};
+
+/**
+ * Verified role assertions for a user (Twitch API / EventSub / manual only —
+ * badge observations never appear here). endedAt null = still current.
+ */
+export async function getVerifiedAssertionsForUser(
+  pool: PostgresPool,
+  twitchUserId: string,
+): Promise<VerifiedAssertionRow[]> {
+  const result = await pool.query<{
+    twitch_channel_id: string;
+    role_name: string;
+    source: "twitch_api" | "twitch_eventsub" | "manual";
+    verified_at: Date;
+    status: string;
+    expires_at: Date | null;
+  }>(
+    `SELECT twitch_channel_id, role_name, source, verified_at, status, expires_at
+     FROM role_evidence
+     WHERE twitch_user_id = $1
+       AND source IN ('twitch_api', 'twitch_eventsub', 'manual')
+       AND verified_at IS NOT NULL`,
+    [twitchUserId],
+  );
+  return result.rows.map((row) => ({
+    twitchChannelId: row.twitch_channel_id,
+    roleName: row.role_name,
+    source: row.source,
+    verifiedAt: row.verified_at,
+    endedAt: row.status === "verified_current" ? null : row.expires_at,
+  }));
+}
+
+export type ChannelMeta = { twitchChannelId: string; login: string; displayName: string };
+
+export async function getChannelMeta(
+  pool: PostgresPool,
+  twitchChannelIds: string[],
+): Promise<Map<string, ChannelMeta>> {
+  if (twitchChannelIds.length === 0) return new Map();
+  const result = await pool.query<{
+    twitch_channel_id: string;
+    login: string;
+    display_name: string;
+  }>(
+    `SELECT twitch_channel_id, login, display_name
+     FROM twitch_channels WHERE twitch_channel_id = ANY($1)`,
+    [twitchChannelIds],
+  );
+  return new Map(
+    result.rows.map((row) => [
+      row.twitch_channel_id,
+      { twitchChannelId: row.twitch_channel_id, login: row.login, displayName: row.display_name },
+    ]),
+  );
+}
+
 export async function recordAuditEvent(
   pool: PostgresPool,
   event: {

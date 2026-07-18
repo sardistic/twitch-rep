@@ -7,6 +7,7 @@ import { buildDefaultGetAppUser, buildServer } from "./server.js";
 import { RedisSessionStore } from "./auth/session.js";
 import { HelixClient } from "./twitch/client.js";
 import { ChatIngestor, RedisDedupStore } from "./eventsub/ingest.js";
+import { DefaultProfileService } from "./services/profile.js";
 
 loadDotenv();
 
@@ -58,6 +59,12 @@ const app = buildServer({
   fetchImpl: fetch,
   getAppUser: buildDefaultGetAppUser(pool),
   ingestor: new ChatIngestor(clickhouse, env.CLICKHOUSE_DATABASE, new RedisDedupStore(redis)),
+  profiles: new DefaultProfileService(pool, clickhouse, env.CLICKHOUSE_DATABASE, {
+    get: (key) => redis.get(key),
+    set: async (key, value, ttlSeconds) => {
+      await redis.set(key, value, "EX", ttlSeconds);
+    },
+  }),
 });
 
 if (!oauthConfig) {

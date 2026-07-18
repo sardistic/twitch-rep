@@ -59,6 +59,7 @@ function buildApp() {
     fetchImpl: fetch,
     getAppUser: async () => null,
     ingestor: new ChatIngestor(clickhouse, "chatterscope", new MemoryDedupStore()),
+    profiles: null,
   };
   return { app: buildServer(deps), inserts };
 }
