@@ -93,6 +93,51 @@ describe.skipIf(!baseUrl)("postgres repositories (integration)", () => {
     expect(await getMembershipsForUser(pool, outsider.id)).toEqual([]);
   });
 
+  it("keeps moderation notes private to their organization", async () => {
+    const { createNote, listNotes, softDeleteNote, updateNote } = await import("./notes.js");
+    const alice = await upsertAppUser(pool, {
+      twitchUserId: "900100010",
+      login: "alice_mod",
+      displayName: "AliceMod",
+      profileImageUrl: null,
+    });
+    const bob = await upsertAppUser(pool, {
+      twitchUserId: "900100011",
+      login: "bob_mod",
+      displayName: "BobMod",
+      profileImageUrl: null,
+    });
+    const orgA = await createOrganizationWithOwner(pool, "Org A", alice.id);
+    const orgB = await createOrganizationWithOwner(pool, "Org B", bob.id);
+    await upsertTwitchUser(pool, {
+      twitchUserId: "900100012",
+      login: "subject_user",
+      displayName: "SubjectUser",
+      accountCreatedAt: null,
+      profileImageUrl: null,
+      broadcasterType: null,
+      description: null,
+    });
+
+    const note = await createNote(pool, {
+      organizationId: orgA.id,
+      twitchUserId: "900100012",
+      twitchChannelId: null,
+      authorUserId: alice.id,
+      body: "org A private note",
+    });
+
+    expect(await listNotes(pool, [orgA.id], "900100012")).toHaveLength(1);
+    // Bob's org cannot see org A's note.
+    expect(await listNotes(pool, [orgB.id], "900100012")).toHaveLength(0);
+    // Only the author can edit or delete.
+    expect(await updateNote(pool, note.id, bob.id, "hijacked")).toBeNull();
+    expect(await softDeleteNote(pool, note.id, bob.id)).toBe(false);
+    expect((await updateNote(pool, note.id, alice.id, "edited"))?.body).toBe("edited");
+    expect(await softDeleteNote(pool, note.id, alice.id)).toBe(true);
+    expect(await listNotes(pool, [orgA.id], "900100012")).toHaveLength(0);
+  });
+
   it("stores oauth grants as ciphertext only", async () => {
     const owner = await upsertAppUser(pool, {
       twitchUserId: "900100005",

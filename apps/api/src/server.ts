@@ -7,12 +7,14 @@ import { buildHealthReport, type HealthChecks } from "./health.js";
 import type { SessionStore } from "./auth/session.js";
 import type { TwitchApi } from "./twitch/client.js";
 import type { ChatIngestor } from "./eventsub/ingest.js";
+import type { ProfileService } from "./services/profile.js";
 import { registerAuthRoutes } from "./routes/auth.js";
 import { registerTwitchUserRoutes } from "./routes/twitch-users.js";
 import { registerChannelRoutes } from "./routes/channels.js";
 import { registerEventSubRoutes } from "./eventsub/routes.js";
 import { registerChatterRoutes } from "./routes/chatters.js";
-import type { ProfileService } from "./services/profile.js";
+import { registerNoteRoutes } from "./routes/notes.js";
+import { DASHBOARD_PAGE } from "./web/page.js";
 
 export const API_VERSION = "0.1.0";
 
@@ -34,156 +36,6 @@ export function buildDefaultGetAppUser(pool: PostgresPool | null) {
   return async (id: string): Promise<AppUser | null> => (pool ? getAppUserById(pool, id) : null);
 }
 
-const LANDING_PAGE = `<!doctype html>
-<html lang="en">
-<head>
-<meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
-<title>ChatterScope</title>
-<style>
-  :root { color-scheme: dark; }
-  body { margin: 0; min-height: 100vh; display: grid; place-items: center;
-         background: #0e0e10; color: #efeff1;
-         font-family: system-ui, -apple-system, "Segoe UI", sans-serif; }
-  main { max-width: 40rem; padding: 2rem; text-align: center; }
-  h1 { font-size: 2.2rem; margin-bottom: 0.25rem; }
-  h1 span { color: #a970ff; }
-  p.tag { color: #adadb8; margin-top: 0; }
-  .services { display: flex; gap: 0.75rem; justify-content: center; margin: 1.5rem 0; flex-wrap: wrap; }
-  .svc { border: 1px solid #2f2f35; border-radius: 0.5rem; padding: 0.5rem 1rem; background: #18181b; }
-  .svc b { display: block; font-size: 0.8rem; color: #adadb8; font-weight: 500; }
-  .state-ok { color: #00f593; }
-  .state-error { color: #f55353; }
-  .state-unknown { color: #adadb8; }
-  .signin { display: inline-block; margin-top: 0.5rem; padding: 0.6rem 1.4rem; border-radius: 0.5rem;
-            background: #9147ff; color: #fff; text-decoration: none; font-weight: 600; }
-  .signin:hover { background: #a970ff; }
-  footer { color: #66666e; font-size: 0.8rem; margin-top: 2rem; }
-</style>
-</head>
-<body>
-<main>
-  <h1>Chatter<span>Scope</span></h1>
-  <p class="tag">Evidence-based chat context for Twitch moderators. Pilot deployment &mdash; dashboard coming soon.</p>
-  <div class="services" id="services">
-    <div class="svc"><b>postgres</b><span class="state-unknown">checking&hellip;</span></div>
-    <div class="svc"><b>clickhouse</b><span class="state-unknown">checking&hellip;</span></div>
-    <div class="svc"><b>redis</b><span class="state-unknown">checking&hellip;</span></div>
-  </div>
-  <div id="account"><a class="signin" href="/v1/auth/twitch/login">Sign in with Twitch</a></div>
-  <div id="tools" style="display:none">
-    <form id="searchForm" style="margin:1rem 0">
-      <input id="searchInput" placeholder="Twitch login, URL, or numeric ID"
-             style="padding:0.55rem 0.8rem;border-radius:0.5rem;border:1px solid #2f2f35;background:#18181b;color:#efeff1;width:16rem">
-      <button class="signin" style="border:0;cursor:pointer" type="submit">Look up</button>
-    </form>
-    <div id="result"></div>
-    <button id="connectBtn" class="signin" style="border:0;cursor:pointer;background:#2f2f35">Connect my channel (start chat ingestion)</button>
-    <div id="connectResult" style="color:#adadb8;font-size:0.85rem;margin-top:0.5rem"></div>
-  </div>
-  <footer id="version"></footer>
-</main>
-<script>
-  fetch("/healthz").then(function (r) { return r.json(); }).then(function (h) {
-    var boxes = document.querySelectorAll(".svc");
-    ["postgres", "clickhouse", "redis"].forEach(function (name, i) {
-      var state = h.services[name] || "unknown";
-      var span = boxes[i].querySelector("span");
-      span.textContent = state;
-      span.className = "state-" + state;
-    });
-    document.getElementById("version").textContent =
-      "v" + h.version + " \\u00b7 " + h.timestamp;
-  }).catch(function () {
-    document.querySelectorAll(".svc span").forEach(function (s) {
-      s.textContent = "unreachable"; s.className = "state-error";
-    });
-  });
-
-  fetch("/v1/me").then(function (r) { return r.ok ? r.json() : null; }).then(function (me) {
-    if (!me) return;
-    document.getElementById("account").innerHTML =
-      "<p>Signed in as <b>" + me.user.displayName.replace(/[<>&]/g, "") + "</b> \\u00b7 " +
-      (me.organizations[0] ? me.organizations[0].name.replace(/[<>&]/g, "") : "") + "</p>";
-    document.getElementById("tools").style.display = "block";
-  }).catch(function () {});
-
-  document.getElementById("searchForm").addEventListener("submit", function (e) {
-    e.preventDefault();
-    var q = document.getElementById("searchInput").value;
-    var out = document.getElementById("result");
-    out.textContent = "Looking up\\u2026";
-    fetch("/v1/twitch/users/resolve?input=" + encodeURIComponent(q))
-      .then(function (r) { return r.json(); })
-      .then(function (data) {
-        if (data.error) { out.textContent = data.error.message; return; }
-        var u = data.user;
-        out.innerHTML =
-          '<div class="svc" style="display:inline-block;text-align:left;margin-top:0.5rem">' +
-          (u.profileImageUrl ? '<img src="' + u.profileImageUrl + '" width="48" style="border-radius:50%;float:left;margin-right:0.75rem">' : "") +
-          "<b>" + u.displayName.replace(/[<>&]/g, "") + "</b> (" + u.login.replace(/[<>&]/g, "") + ")<br>" +
-          "ID " + u.twitchUserId + " \\u00b7 created " + (u.accountCreatedAt || "unknown").slice(0, 10) +
-          "<br><span style='color:#66666e'>source: " + data.source + "</span><br>" +
-          "<a href='#' style='color:#a970ff' onclick='loadProfile(\\"" + u.twitchUserId + "\\");return false'>View profile \\u2192</a></div>" +
-          "<div id='profile'></div>";
-      })
-      .catch(function () { out.textContent = "Lookup failed."; });
-  });
-
-  window.loadProfile = function (id) {
-    var out = document.getElementById("profile");
-    out.textContent = "Loading profile\\u2026";
-    Promise.all([
-      fetch("/v1/chatters/" + id + "/profile").then(function (r) { return r.json(); }),
-      fetch("/v1/chatters/" + id + "/messages?limit=10").then(function (r) { return r.json(); })
-    ]).then(function (results) {
-      var p = results[0], msgs = results[1];
-      function esc(s) { return String(s == null ? "" : s).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;"); }
-      var html = "<div style='text-align:left;margin-top:1rem'>";
-      html += "<p><b>" + p.summary.messagesObserved + "</b> messages across <b>" +
-        p.summary.channelsObserved + "</b> channel(s)" +
-        (p.summary.firstObservedAt ? " \\u00b7 first seen " + esc(p.summary.firstObservedAt.slice(0, 10)) : "") + "</p>";
-      if (p.roles.length) {
-        html += "<table style='border-collapse:collapse;font-size:0.85rem'><tr><th style='text-align:left;padding:0.2rem 0.6rem'>Channel</th><th style='text-align:left;padding:0.2rem 0.6rem'>Role</th><th style='text-align:left;padding:0.2rem 0.6rem'>Status</th><th style='text-align:left;padding:0.2rem 0.6rem'>Last seen</th><th style='text-align:left;padding:0.2rem 0.6rem'>Evidence</th></tr>";
-        p.roles.forEach(function (r) {
-          html += "<tr><td style='padding:0.2rem 0.6rem'>" + esc(r.channel.login || r.channel.twitchChannelId) +
-            "</td><td style='padding:0.2rem 0.6rem'>" + esc(r.role) +
-            "</td><td style='padding:0.2rem 0.6rem'>" + esc(r.status) + " [" + esc(r.source) + "]" +
-            "</td><td style='padding:0.2rem 0.6rem'>" + esc((r.lastObservedAt || "").slice(0, 10)) +
-            "</td><td style='padding:0.2rem 0.6rem'>" + r.evidenceCount + "</td></tr>";
-        });
-        html += "</table>";
-      } else { html += "<p style='color:#adadb8'>No role observations yet.</p>"; }
-      if (msgs.messages && msgs.messages.length) {
-        html += "<p style='margin-bottom:0.25rem'><b>Recent messages</b> (authorized channels only)</p>";
-        msgs.messages.forEach(function (m) {
-          html += "<div style='font-size:0.85rem;color:#adadb8'>[" + esc(m.sentAt.slice(0, 16).replace("T", " ")) +
-            " \\u00b7 " + esc(m.channelLogin || m.twitchChannelId) + "] " + esc(m.messageText) + "</div>";
-        });
-      }
-      p.warnings.forEach(function (w) {
-        html += "<p style='color:#66666e;font-size:0.75rem'>\\u26a0 " + esc(w.message) + "</p>";
-      });
-      out.innerHTML = html + "</div>";
-    }).catch(function () { out.textContent = "Profile load failed."; });
-  };
-
-  document.getElementById("connectBtn").addEventListener("click", function () {
-    var out = document.getElementById("connectResult");
-    out.textContent = "Connecting\\u2026";
-    fetch("/v1/channels/connect", { method: "POST" })
-      .then(function (r) { return r.json(); })
-      .then(function (data) {
-        out.textContent = data.error
-          ? data.error.message
-          : "Connected " + data.channel.login + " \\u00b7 subscription " + data.subscription.status;
-      })
-      .catch(function () { out.textContent = "Connect failed."; });
-  });
-</script>
-</body>
-</html>`;
-
 export function buildServer(deps: ServerDeps): FastifyInstance {
   const { env, checks } = deps;
   const app = Fastify({
@@ -197,7 +49,7 @@ export function buildServer(deps: ServerDeps): FastifyInstance {
   void app.register(fastifyCookie);
 
   app.get("/", async (_request, reply) => {
-    return reply.type("text/html; charset=utf-8").send(LANDING_PAGE);
+    return reply.type("text/html; charset=utf-8").send(DASHBOARD_PAGE);
   });
 
   const healthHandler = async (reply: {
@@ -215,6 +67,7 @@ export function buildServer(deps: ServerDeps): FastifyInstance {
   registerChannelRoutes(app, deps);
   registerEventSubRoutes(app, deps);
   registerChatterRoutes(app, deps);
+  registerNoteRoutes(app, deps);
 
   return app;
 }
