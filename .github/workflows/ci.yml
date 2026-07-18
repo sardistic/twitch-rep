@@ -1,0 +1,59 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: chatterscope
+          POSTGRES_PASSWORD: chatterscope
+          POSTGRES_DB: chatterscope
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U chatterscope"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 10
+      clickhouse:
+        image: clickhouse/clickhouse-server:24.8-alpine
+        env:
+          CLICKHOUSE_DB: chatterscope
+        ports:
+          - 8123:8123
+      redis:
+        image: redis:7-alpine
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 10
+    env:
+      POSTGRES_URL: postgresql://chatterscope:chatterscope@localhost:5432/chatterscope
+      CLICKHOUSE_URL: http://localhost:8123
+      REDIS_URL: redis://localhost:6379
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm build
+      - run: pnpm lint
+      - run: pnpm typecheck
+      - run: pnpm test
+      - name: Run database migrations against CI Postgres
+        run: pnpm db:migrate
+      - name: Check formatting
+        run: pnpm exec prettier --check .
