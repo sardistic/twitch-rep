@@ -1,8 +1,31 @@
 import Fastify, { type FastifyInstance } from "fastify";
+import fastifyCookie from "@fastify/cookie";
 import type { Env } from "@chatterscope/config";
+import type { FetchLike, TwitchOAuthConfig } from "@chatterscope/auth";
+import { getAppUserById, type AppUser, type PostgresPool } from "@chatterscope/postgres";
 import { buildHealthReport, type HealthChecks } from "./health.js";
+import type { SessionStore } from "./auth/session.js";
+import type { TwitchApi } from "./twitch/client.js";
+import { registerAuthRoutes } from "./routes/auth.js";
+import { registerTwitchUserRoutes } from "./routes/twitch-users.js";
 
 export const API_VERSION = "0.1.0";
+
+export type ServerDeps = {
+  env: Env;
+  checks: HealthChecks;
+  pool: PostgresPool | null;
+  sessions: SessionStore;
+  twitch: TwitchApi | null;
+  oauthConfig: TwitchOAuthConfig | null;
+  encryptionKey: Buffer | null;
+  fetchImpl: FetchLike;
+  getAppUser: (id: string) => Promise<AppUser | null>;
+};
+
+export function buildDefaultGetAppUser(pool: PostgresPool | null) {
+  return async (id: string): Promise<AppUser | null> => (pool ? getAppUserById(pool, id) : null);
+}
 
 const LANDING_PAGE = `<!doctype html>
 <html lang="en">
@@ -25,6 +48,9 @@ const LANDING_PAGE = `<!doctype html>
   .state-ok { color: #00f593; }
   .state-error { color: #f55353; }
   .state-unknown { color: #adadb8; }
+  .signin { display: inline-block; margin-top: 0.5rem; padding: 0.6rem 1.4rem; border-radius: 0.5rem;
+            background: #9147ff; color: #fff; text-decoration: none; font-weight: 600; }
+  .signin:hover { background: #a970ff; }
   footer { color: #66666e; font-size: 0.8rem; margin-top: 2rem; }
 </style>
 </head>
@@ -37,6 +63,7 @@ const LANDING_PAGE = `<!doctype html>
     <div class="svc"><b>clickhouse</b><span class="state-unknown">checking&hellip;</span></div>
     <div class="svc"><b>redis</b><span class="state-unknown">checking&hellip;</span></div>
   </div>
+  <a class="signin" href="/v1/auth/twitch/login">Sign in with Twitch</a>
   <footer id="version"></footer>
 </main>
 <script>
@@ -59,7 +86,8 @@ const LANDING_PAGE = `<!doctype html>
 </body>
 </html>`;
 
-export function buildServer(env: Env, checks: HealthChecks): FastifyInstance {
+export function buildServer(deps: ServerDeps): FastifyInstance {
+  const { env, checks } = deps;
   const app = Fastify({
     logger: {
       level: env.LOG_LEVEL,
@@ -68,19 +96,24 @@ export function buildServer(env: Env, checks: HealthChecks): FastifyInstance {
     genReqId: () => crypto.randomUUID(),
   });
 
+  void app.register(fastifyCookie);
+
   app.get("/", async (_request, reply) => {
     return reply.type("text/html; charset=utf-8").send(LANDING_PAGE);
   });
 
-  app.get("/healthz", async (_request, reply) => {
+  const healthHandler = async (reply: {
+    status: (code: number) => { send: (body: unknown) => unknown };
+  }) => {
     const report = await buildHealthReport(checks, API_VERSION);
     return reply.status(report.status === "ok" ? 200 : 503).send(report);
-  });
+  };
 
-  app.get("/v1/health", async (_request, reply) => {
-    const report = await buildHealthReport(checks, API_VERSION);
-    return reply.status(report.status === "ok" ? 200 : 503).send(report);
-  });
+  app.get("/healthz", async (_request, reply) => healthHandler(reply));
+  app.get("/v1/health", async (_request, reply) => healthHandler(reply));
+
+  registerAuthRoutes(app, deps);
+  registerTwitchUserRoutes(app, deps);
 
   return app;
 }

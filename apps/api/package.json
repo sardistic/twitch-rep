@@ -12,10 +12,14 @@
     "start": "node dist/main.js"
   },
   "dependencies": {
+    "@chatterscope/auth": "workspace:*",
     "@chatterscope/clickhouse": "workspace:*",
     "@chatterscope/config": "workspace:*",
+    "@chatterscope/contracts": "workspace:*",
     "@chatterscope/postgres": "workspace:*",
+    "@fastify/cookie": "^11.0.2",
     "fastify": "^5.3.2",
+    "zod": "^3.24.2",
     "ioredis": "^5.6.1",
     "pino": "^9.6.0"
   },

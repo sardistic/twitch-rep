@@ -1,12 +1,15 @@
 import { Redis } from "ioredis";
 import { loadDotenv, loadEnv } from "@chatterscope/config";
-
-loadDotenv();
+import { deriveKey, type TwitchOAuthConfig } from "@chatterscope/auth";
 import { checkClickHouse, createClickHouse } from "@chatterscope/clickhouse";
 import { checkPostgres, createPool } from "@chatterscope/postgres";
-import { buildServer } from "./server.js";
+import { buildDefaultGetAppUser, buildServer } from "./server.js";
+import { RedisSessionStore } from "./auth/session.js";
+import { HelixClient } from "./twitch/client.js";
 
-const env = loadEnv();
+loadDotenv();
+
+const env = loadEnv(process.env, { requireSecrets: ["SESSION_SECRET", "ENCRYPTION_KEY"] });
 
 const pool = createPool(env.POSTGRES_URL);
 const clickhouse = createClickHouse({
@@ -27,14 +30,37 @@ redis.on("error", (error) => {
   void error;
 });
 
-const app = buildServer(env, {
-  postgres: () => checkPostgres(pool),
-  clickhouse: () => checkClickHouse(clickhouse),
-  redis: async () => {
-    const pong = await redis.ping();
-    if (pong !== "PONG") throw new Error(`unexpected redis ping response: ${pong}`);
+const oauthConfig: TwitchOAuthConfig | null =
+  env.TWITCH_CLIENT_ID && env.TWITCH_CLIENT_SECRET && env.TWITCH_REDIRECT_URI
+    ? {
+        clientId: env.TWITCH_CLIENT_ID,
+        clientSecret: env.TWITCH_CLIENT_SECRET,
+        redirectUri: env.TWITCH_REDIRECT_URI,
+      }
+    : null;
+
+const app = buildServer({
+  env,
+  checks: {
+    postgres: () => checkPostgres(pool),
+    clickhouse: () => checkClickHouse(clickhouse),
+    redis: async () => {
+      const pong = await redis.ping();
+      if (pong !== "PONG") throw new Error(`unexpected redis ping response: ${pong}`);
+    },
   },
+  pool,
+  sessions: new RedisSessionStore(redis),
+  twitch: oauthConfig ? new HelixClient(oauthConfig.clientId, oauthConfig.clientSecret) : null,
+  oauthConfig,
+  encryptionKey: deriveKey(env.ENCRYPTION_KEY!),
+  fetchImpl: fetch,
+  getAppUser: buildDefaultGetAppUser(pool),
 });
+
+if (!oauthConfig) {
+  app.log.warn("Twitch OAuth is not configured; sign-in routes will return 503");
+}
 
 async function shutdown(signal: string): Promise<void> {
   app.log.info({ signal }, "shutting down");
