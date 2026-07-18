@@ -35,6 +35,7 @@ function buildDeps(overrides: Partial<ServerDeps> = {}): ServerDeps {
     encryptionKey: null,
     fetchImpl: fetch,
     getAppUser: async () => null,
+    ingestor: null,
     ...overrides,
   };
 }
@@ -56,6 +57,7 @@ describe("auth routes", () => {
           getUserByLogin: async () => null,
           getUserById: async () => null,
           getUserForToken: async () => null,
+          createChatMessageSubscription: async () => ({ subscriptionId: "s", status: "enabled" }),
         },
         oauthConfig: {
           clientId: "cid",
@@ -81,6 +83,7 @@ describe("auth routes", () => {
           getUserByLogin: async () => null,
           getUserById: async () => null,
           getUserForToken: async () => null,
+          createChatMessageSubscription: async () => ({ subscriptionId: "s", status: "enabled" }),
         },
         oauthConfig: {
           clientId: "cid",

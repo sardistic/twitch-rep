@@ -254,6 +254,71 @@ export async function saveOauthGrant(
   );
 }
 
+export async function upsertTwitchChannel(
+  pool: PostgresPool,
+  channel: { twitchChannelId: string; login: string; displayName: string },
+): Promise<void> {
+  await pool.query(
+    `INSERT INTO twitch_channels (twitch_channel_id, login, display_name, fetched_at)
+     VALUES ($1, $2, $3, now())
+     ON CONFLICT (twitch_channel_id) DO UPDATE SET
+       login = EXCLUDED.login,
+       display_name = EXCLUDED.display_name,
+       fetched_at = now(),
+       updated_at = now()`,
+    [channel.twitchChannelId, channel.login, channel.displayName],
+  );
+}
+
+export async function connectOrganizationChannel(
+  pool: PostgresPool,
+  organizationId: string,
+  twitchChannelId: string,
+  connectedByUserId: string,
+): Promise<void> {
+  await pool.query(
+    `INSERT INTO organization_channels (organization_id, twitch_channel_id, connected_by_user_id)
+     VALUES ($1, $2, $3)
+     ON CONFLICT (organization_id, twitch_channel_id) DO UPDATE SET enabled = true`,
+    [organizationId, twitchChannelId, connectedByUserId],
+  );
+}
+
+export type OrganizationChannel = {
+  twitchChannelId: string;
+  login: string;
+  displayName: string;
+  enabled: boolean;
+  connectedAt: Date;
+};
+
+export async function listOrganizationChannels(
+  pool: PostgresPool,
+  organizationId: string,
+): Promise<OrganizationChannel[]> {
+  const result = await pool.query<{
+    twitch_channel_id: string;
+    login: string;
+    display_name: string;
+    enabled: boolean;
+    connected_at: Date;
+  }>(
+    `SELECT c.twitch_channel_id, c.login, c.display_name, oc.enabled, oc.connected_at
+     FROM organization_channels oc
+     JOIN twitch_channels c ON c.twitch_channel_id = oc.twitch_channel_id
+     WHERE oc.organization_id = $1
+     ORDER BY c.login`,
+    [organizationId],
+  );
+  return result.rows.map((row) => ({
+    twitchChannelId: row.twitch_channel_id,
+    login: row.login,
+    displayName: row.display_name,
+    enabled: row.enabled,
+    connectedAt: row.connected_at,
+  }));
+}
+
 export async function recordAuditEvent(
   pool: PostgresPool,
   event: {

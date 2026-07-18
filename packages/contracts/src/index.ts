@@ -70,3 +70,44 @@ export type ApiError = z.infer<typeof apiErrorSchema>;
 export function apiError(code: string, message: string): ApiError {
   return { error: { code, message } };
 }
+
+export const chatBadgeSchema = z.object({
+  setId: z.string(),
+  id: z.string(),
+  info: z.string().optional(),
+});
+export type ChatBadge = z.infer<typeof chatBadgeSchema>;
+
+export const normalizedChatMessageSchema = z.object({
+  messageId: z.string().min(1),
+  twitchChannelId: z.string().min(1),
+  twitchUserId: z.string().min(1),
+  userLogin: z.string().min(1),
+  displayName: z.string().min(1),
+  messageText: z.string(),
+  badges: z.array(chatBadgeSchema),
+  color: z.string().optional(),
+  replyParentMessageId: z.string().optional(),
+  firstMessage: z.boolean(),
+  returningChatter: z.boolean(),
+  sentAt: z.string().datetime(),
+  source: z.enum(["eventsub", "irc", "external"]),
+  provider: z.string().min(1),
+  raw: z.unknown(),
+});
+export type NormalizedChatMessage = z.infer<typeof normalizedChatMessageSchema>;
+
+/**
+ * Badge set id → role name. Data-driven per the handoff; unknown badges are
+ * preserved in storage but never interpreted as roles.
+ */
+export const DEFAULT_BADGE_ROLE_MAP: Readonly<Record<string, string>> = {
+  broadcaster: "broadcaster",
+  moderator: "moderator",
+  vip: "vip",
+  subscriber: "subscriber",
+  founder: "founder",
+  staff: "staff",
+  admin: "admin",
+  global_mod: "global_moderator",
+};

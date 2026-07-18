@@ -24,7 +24,9 @@ export function registerAuthRoutes(app: FastifyInstance, deps: ServerDeps): void
     }
     const state = randomBytes(24).toString("hex");
     await sessions.saveOauthState(state);
-    return reply.redirect(buildAuthorizeUrl(oauthConfig, state));
+    // user:read:chat lets us subscribe to channel.chat.message for the
+    // signing-in broadcaster's own channel.
+    return reply.redirect(buildAuthorizeUrl(oauthConfig, state, ["user:read:chat"]));
   });
 
   app.get<{ Querystring: { code?: string; state?: string; error?: string } }>(

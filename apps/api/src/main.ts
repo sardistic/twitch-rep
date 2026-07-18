@@ -6,6 +6,7 @@ import { checkPostgres, createPool } from "@chatterscope/postgres";
 import { buildDefaultGetAppUser, buildServer } from "./server.js";
 import { RedisSessionStore } from "./auth/session.js";
 import { HelixClient } from "./twitch/client.js";
+import { ChatIngestor, RedisDedupStore } from "./eventsub/ingest.js";
 
 loadDotenv();
 
@@ -56,6 +57,7 @@ const app = buildServer({
   encryptionKey: deriveKey(env.ENCRYPTION_KEY!),
   fetchImpl: fetch,
   getAppUser: buildDefaultGetAppUser(pool),
+  ingestor: new ChatIngestor(clickhouse, env.CLICKHOUSE_DATABASE, new RedisDedupStore(redis)),
 });
 
 if (!oauthConfig) {

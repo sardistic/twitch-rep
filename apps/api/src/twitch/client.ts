@@ -26,6 +26,12 @@ export interface TwitchApi {
   getUserByLogin(login: string): Promise<HelixUser | null>;
   getUserById(twitchUserId: string): Promise<HelixUser | null>;
   getUserForToken(userAccessToken: string): Promise<HelixUser | null>;
+  createChatMessageSubscription(
+    broadcasterUserId: string,
+    userId: string,
+    callbackUrl: string,
+    secret: string,
+  ): Promise<{ subscriptionId: string; status: string }>;
 }
 
 function toHelixUser(user: z.infer<typeof helixUserSchema>): HelixUser {
@@ -92,5 +98,38 @@ export class HelixClient implements TwitchApi {
   async getUserForToken(userAccessToken: string): Promise<HelixUser | null> {
     const users = await this.getUsers("", userAccessToken);
     return users[0] ?? null;
+  }
+
+  async createChatMessageSubscription(
+    broadcasterUserId: string,
+    userId: string,
+    callbackUrl: string,
+    secret: string,
+  ): Promise<{ subscriptionId: string; status: string }> {
+    const token = await this.getAppToken();
+    const response = await this.fetchImpl("https://api.twitch.tv/helix/eventsub/subscriptions", {
+      method: "POST",
+      headers: {
+        authorization: `Bearer ${token}`,
+        "client-id": this.clientId,
+        "content-type": "application/json",
+      },
+      body: JSON.stringify({
+        type: "channel.chat.message",
+        version: "1",
+        condition: { broadcaster_user_id: broadcasterUserId, user_id: userId },
+        transport: { method: "webhook", callback: callbackUrl, secret },
+      }),
+    });
+    const body = (await response.json()) as {
+      data?: Array<{ id: string; status: string }>;
+      message?: string;
+    };
+    if (!response.ok || !body.data?.[0]) {
+      throw new Error(
+        `EventSub subscription failed (${response.status}): ${body.message ?? "unknown"}`,
+      );
+    }
+    return { subscriptionId: body.data[0].id, status: body.data[0].status };
   }
 }
