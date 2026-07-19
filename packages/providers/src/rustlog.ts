@@ -107,6 +107,21 @@ export class RustlogCompatibleProvider implements ChatLogProvider {
     return reference;
   }
 
+  async listChannels(): Promise<Array<{ twitchChannelId?: string; login?: string }>> {
+    const response = await this.request("channels");
+    if (!response.ok) throw new Error(`Provider /channels returned ${response.status}`);
+    const parsed = z
+      .object({
+        channels: z.array(z.object({ name: z.string(), userID: z.string().optional() })),
+      })
+      .safeParse(await response.json());
+    if (!parsed.success) throw new Error("Provider /channels response failed schema validation");
+    return parsed.data.channels.map((c) => ({
+      login: c.name.toLowerCase(),
+      ...(c.userID ? { twitchChannelId: c.userID } : {}),
+    }));
+  }
+
   async queryMessages(query: ProviderQuery): Promise<ProviderQueryResult> {
     if (!query.channel?.login && !query.channel?.twitchChannelId) {
       throw new Error("Rustlog-compatible providers require a channel to query");

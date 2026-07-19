@@ -227,7 +227,8 @@ function renderProfile(notes) {
     Object.keys(channels).map(function (id) { return "<option value='" + esc(id) + "'>" + esc(channels[id]) + "</option>"; }).join("") +
     "</select></div><div id='rolesTable'></div></div>";
 
-  html += "<div class='card'><b>Messages</b> <span class='tiny'>(authorized channels only)</span>" +
+  html += "<div class='card'><b>Messages</b> <span class='tiny'>(authorized channels only)</span> " +
+    "<button id='enrichBtn' class='btn ghost small'>Fetch external logs</button> <span id='enrichMsg' class='tiny'></span>" +
     "<div id='messagesList'></div>" +
     (nextCursor ? "<button id='moreBtn' class='btn ghost small' style='margin-top:0.5rem'>Load more</button>" : "") +
     "</div>";
@@ -245,6 +246,28 @@ function renderProfile(notes) {
   $("channelFilter").addEventListener("change", renderRoles);
   var more = $("moreBtn");
   if (more) more.addEventListener("click", loadMoreMessages);
+  $("enrichBtn").addEventListener("click", function () {
+    $("enrichMsg").textContent = "Starting scan\\u2026";
+    var uid = currentUserId;
+    api("/v1/chatters/" + uid + "/enrich", { method: "POST" })
+      .then(function () {
+        var poll = setInterval(function () {
+          api("/v1/chatters/" + uid + "/enrich/status").then(function (s) {
+            if (s.status === "running") {
+              $("enrichMsg").textContent = "Scanning " + s.scanned + "/" + s.total +
+                " channels \\u00b7 found logs in " + s.channelsWithLogs + " \\u00b7 imported " + s.written;
+            } else {
+              clearInterval(poll);
+              $("enrichMsg").textContent = (s.status === "done"
+                ? "Done: logs found in " + s.channelsWithLogs + " channel(s), imported " + s.written + " new messages."
+                : "Failed: " + (s.error || "unknown")) + "";
+              if (s.status === "done" && uid === currentUserId) loadProfile(uid);
+            }
+          }).catch(function () { clearInterval(poll); });
+        }, 2000);
+      })
+      .catch(function (err) { $("enrichMsg").textContent = err.message; });
+  });
   $("noteForm").addEventListener("submit", function (e) {
     e.preventDefault();
     var body = $("noteBody").value.trim();

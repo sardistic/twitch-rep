@@ -34,6 +34,11 @@ export type ServerDeps = {
   profileCacheDelete?: (key: string) => Promise<void>;
   watchChannel?: (login: string) => void;
   unwatchChannelById?: (twitchChannelId: string) => void;
+  /** Small shared key-value store (Redis in production) for job progress. */
+  kv?: {
+    get(key: string): Promise<string | null>;
+    set(key: string, value: string, ttlSeconds: number): Promise<void>;
+  };
 };
 
 export function buildDefaultGetAppUser(pool: PostgresPool | null) {

@@ -121,6 +121,12 @@ const app = buildServer({
   profileCacheDelete: async (key) => {
     await redis.del(key);
   },
+  kv: {
+    get: (key) => redis.get(key),
+    set: async (key, value, ttlSeconds) => {
+      await redis.set(key, value, "EX", ttlSeconds);
+    },
+  },
   watchChannel: (login) => irc.join(login),
   unwatchChannelById: (twitchChannelId) => {
     void getChannelMeta(pool, [twitchChannelId]).then((meta) => {

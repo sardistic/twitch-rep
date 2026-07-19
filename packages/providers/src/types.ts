@@ -45,4 +45,6 @@ export interface ChatLogProvider {
   testConnection(): Promise<void>;
   resolveUser(reference: ProviderUserReference): Promise<ProviderUserReference>;
   queryMessages(query: ProviderQuery): Promise<ProviderQueryResult>;
+  /** Channels this provider has logs for, when the service exposes a list. */
+  listChannels?(): Promise<ProviderChannelReference[]>;
 }

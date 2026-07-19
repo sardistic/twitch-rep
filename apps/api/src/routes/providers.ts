@@ -1,6 +1,6 @@
 import type { FastifyInstance } from "fastify";
 import { z } from "zod";
-import { apiError, type NormalizedChatMessage } from "@chatterscope/contracts";
+import { apiError } from "@chatterscope/contracts";
 import { parseUserSearchInput } from "@chatterscope/auth";
 import {
   RustlogCompatibleProvider,
@@ -13,7 +13,9 @@ import {
   finishSyncRun,
   getMembershipsForUser,
   getProviderForOrgs,
+  getTwitchUserById,
   getTwitchUserByLogin,
+  listOrganizationChannels,
   listProvidersForOrgs,
   recordAuditEvent,
   startSyncRun,
@@ -57,6 +59,204 @@ export function registerProviderRoutes(app: FastifyInstance, deps: ServerDeps): 
         .map((m) => m.organizationId),
     };
   }
+
+  /** Queries one provider for one user in one channel and ingests the results. */
+  async function importFromProvider(
+    record: ProviderRecord,
+    provider: ChatLogProvider,
+    userRef: { twitchUserId?: string; login?: string },
+    channelRef: { twitchChannelId?: string; login?: string },
+    limit: number,
+  ): Promise<{ read: number; written: number }> {
+    const result = await provider.queryMessages({
+      user: userRef,
+      channel: channelRef,
+      limit,
+    });
+    let written = 0;
+    for (const message of result.messages) {
+      const userId =
+        message.user.twitchUserId ??
+        userRef.twitchUserId ??
+        (message.user.login
+          ? (await getTwitchUserByLogin(pool!, message.user.login))?.twitchUserId
+          : undefined);
+      const channelId =
+        message.channel.twitchChannelId ??
+        channelRef.twitchChannelId ??
+        (message.channel.login
+          ? (await getTwitchUserByLogin(pool!, message.channel.login))?.twitchUserId
+          : undefined);
+      if (!userId || !channelId) continue;
+      const outcome = await ingestor!.ingest({
+        messageId: message.messageId ?? `${record.id}:${message.providerRecordId}`,
+        twitchChannelId: channelId,
+        twitchUserId: userId,
+        userLogin: message.user.login ?? "unknown",
+        displayName: message.user.login ?? "unknown",
+        messageText: message.messageText,
+        badges: message.badges,
+        firstMessage: false,
+        returningChatter: false,
+        sentAt: message.sentAt,
+        source: "external",
+        provider: record.name,
+        raw: message.raw,
+      });
+      if (outcome.status === "ingested") written += 1;
+    }
+    return { read: result.messages.length, written };
+  }
+
+  type EnrichProgress = {
+    status: "running" | "done" | "failed";
+    scanned: number;
+    total: number;
+    channelsWithLogs: number;
+    read: number;
+    written: number;
+    startedAt: string;
+    error?: string;
+  };
+
+  const ENRICH_TTL_SECONDS = 60 * 60;
+  const ENRICH_CONCURRENCY = 10;
+  const runningEnrich = new Set<string>();
+
+  async function runEnrich(twitchUserId: string, actorUserId: string, orgId: string | null) {
+    const key = `enrich:${twitchUserId}`;
+    const progress: EnrichProgress = {
+      status: "running",
+      scanned: 0,
+      total: 0,
+      channelsWithLogs: 0,
+      read: 0,
+      written: 0,
+      startedAt: new Date().toISOString(),
+    };
+    const save = () => deps.kv?.set(key, JSON.stringify(progress), ENRICH_TTL_SECONDS);
+    await save();
+    try {
+      const providers = (await listProvidersForOrgs(pool!, orgId ? [orgId] : [])).filter(
+        (p) => p.enabled,
+      );
+      const cachedUser = await getTwitchUserById(pool!, twitchUserId);
+      const userRef = {
+        twitchUserId,
+        ...(cachedUser ? { login: cachedUser.login } : {}),
+      };
+      for (const record of providers) {
+        const provider = buildProvider(record);
+        // Scan every channel the provider has logs for; fall back to the
+        // org's watched channels when the service exposes no channel list.
+        let channels: Array<{ twitchChannelId?: string; login?: string }>;
+        try {
+          channels = provider.listChannels
+            ? await provider.listChannels()
+            : (await listOrganizationChannels(pool!, orgId ?? "")).map((c) => ({
+                twitchChannelId: c.twitchChannelId,
+                login: c.login,
+              }));
+        } catch {
+          channels = [];
+        }
+        progress.total += channels.length;
+        await save();
+        const runId = await startSyncRun(pool!, record.id);
+        let queue = [...channels];
+        let failed = 0;
+        const worker = async () => {
+          for (;;) {
+            const channel = queue.shift();
+            if (!channel) return;
+            try {
+              const outcome = await importFromProvider(record, provider, userRef, channel, 1000);
+              progress.read += outcome.read;
+              progress.written += outcome.written;
+              if (outcome.read > 0) progress.channelsWithLogs += 1;
+            } catch {
+              failed += 1;
+              // A misbehaving provider should not spin through thousands of
+              // failing requests; abandon it after repeated failures.
+              if (failed > 20) queue = [];
+            }
+            progress.scanned += 1;
+            if (progress.scanned % 25 === 0) await save();
+          }
+        };
+        await Promise.all(Array.from({ length: ENRICH_CONCURRENCY }, () => worker()));
+        await finishSyncRun(pool!, runId, {
+          status: failed > 20 ? "failed" : "succeeded",
+          recordsRead: progress.read,
+          recordsWritten: progress.written,
+          ...(failed > 0 ? { error: `${failed} channel queries failed` } : {}),
+        });
+      }
+      progress.status = "done";
+    } catch (error) {
+      progress.status = "failed";
+      progress.error = (error as Error).message;
+    }
+    await save();
+    await deps.profileCacheDelete?.(`profile:${twitchUserId}`);
+    await recordAuditEvent(pool!, {
+      organizationId: orgId,
+      actorUserId,
+      action: "chatter.enrich",
+      targetType: "twitch_user",
+      targetId: twitchUserId,
+      metadata: { read: progress.read, written: progress.written, scanned: progress.scanned },
+    });
+    runningEnrich.delete(twitchUserId);
+  }
+
+  /**
+   * Fetches this user's history from every enabled provider across every
+   * channel each provider has logs for. Runs in the background; poll the
+   * status endpoint for progress.
+   */
+  app.post<{ Params: { twitchUserId: string } }>(
+    "/v1/chatters/:twitchUserId/enrich",
+    { preHandler: requireSession(deps) },
+    async (request, reply) => {
+      if (!pool || !ingestor || !deps.kv) {
+        return reply.status(503).send(apiError("NOT_CONFIGURED", "Ingestion unavailable."));
+      }
+      const { twitchUserId } = request.params;
+      if (!/^\d{1,20}$/.test(twitchUserId)) {
+        return reply.status(400).send(apiError("INVALID_INPUT", "Twitch user IDs are numeric."));
+      }
+      const orgs = await requireAdminOrgs(request.session!.appUserId);
+      if (orgs.admin.length === 0) {
+        return reply.status(403).send(apiError("FORBIDDEN", "Admin access required."));
+      }
+      const providers = (await listProvidersForOrgs(pool, orgs.admin)).filter((p) => p.enabled);
+      if (providers.length === 0) {
+        return reply
+          .status(400)
+          .send(apiError("NO_PROVIDERS", "Configure a log provider first (Providers tab)."));
+      }
+      if (runningEnrich.has(twitchUserId)) {
+        return reply.status(202).send({ started: false, alreadyRunning: true });
+      }
+      runningEnrich.add(twitchUserId);
+      void runEnrich(twitchUserId, request.session!.appUserId, orgs.admin[0] ?? null).catch(
+        (error) => request.log.error({ err: error }, "enrich job crashed"),
+      );
+      return reply.status(202).send({ started: true });
+    },
+  );
+
+  app.get<{ Params: { twitchUserId: string } }>(
+    "/v1/chatters/:twitchUserId/enrich/status",
+    { preHandler: requireSession(deps) },
+    async (request, reply) => {
+      if (!deps.kv) return reply.status(503).send(apiError("NOT_CONFIGURED", "Unavailable."));
+      const raw = await deps.kv.get(`enrich:${request.params.twitchUserId}`);
+      if (!raw) return reply.status(404).send(apiError("NOT_FOUND", "No enrichment job found."));
+      return reply.send(JSON.parse(raw));
+    },
+  );
 
   app.get("/v1/providers", { preHandler: requireSession(deps) }, async (request, reply) => {
     if (!pool) return reply.status(503).send(apiError("DATABASE_UNAVAILABLE", "No database."));
@@ -159,63 +359,24 @@ export function registerProviderRoutes(app: FastifyInstance, deps: ServerDeps): 
       let read = 0;
       let written = 0;
       try {
-        const result = await provider.queryMessages({
-          user:
-            userRef.kind === "id"
-              ? { twitchUserId: userRef.twitchUserId }
-              : { login: userRef.login },
-          channel:
-            channelRef.kind === "id"
-              ? { twitchChannelId: channelRef.twitchUserId }
-              : { login: channelRef.login },
-          limit: parsed.data.limit ?? 500,
-        });
-        read = result.messages.length;
-        for (const message of result.messages) {
-          // Provider messages usually carry logins, not ids; resolve through
-          // the identity cache and skip messages we cannot attribute safely.
-          const userId =
-            message.user.twitchUserId ??
-            (message.user.login
-              ? (await getTwitchUserByLogin(pool, message.user.login))?.twitchUserId
-              : undefined);
-          const channelId =
-            message.channel.twitchChannelId ??
-            (message.channel.login
-              ? (await getTwitchUserByLogin(pool, message.channel.login))?.twitchUserId
-              : undefined);
-          if (!userId || !channelId) continue;
-          const normalized: NormalizedChatMessage = {
-            messageId: message.messageId ?? `${record.id}:${message.providerRecordId}`,
-            twitchChannelId: channelId,
-            twitchUserId: userId,
-            userLogin: message.user.login ?? "unknown",
-            displayName: message.user.login ?? "unknown",
-            messageText: message.messageText,
-            badges: message.badges,
-            firstMessage: false,
-            returningChatter: false,
-            sentAt: message.sentAt,
-            source: "external",
-            provider: record.name,
-            raw: message.raw,
-          };
-          const outcome = await ingestor.ingest(normalized);
-          if (outcome.status === "ingested") written += 1;
-        }
+        const outcome = await importFromProvider(
+          record,
+          provider,
+          userRef.kind === "id" ? { twitchUserId: userRef.twitchUserId } : { login: userRef.login },
+          channelRef.kind === "id"
+            ? { twitchChannelId: channelRef.twitchUserId }
+            : { login: channelRef.login },
+          parsed.data.limit ?? 500,
+        );
+        read = outcome.read;
+        written = outcome.written;
         await finishSyncRun(pool, runId, {
           status: "succeeded",
           recordsRead: read,
           recordsWritten: written,
         });
-        if (deps.profileCacheDelete) {
-          const ids = new Set(
-            result.messages
-              .map((m) => m.user.twitchUserId)
-              .filter((id): id is string => Boolean(id)),
-          );
-          if (userRef.kind === "id") ids.add(userRef.twitchUserId);
-          for (const id of ids) await deps.profileCacheDelete(`profile:${id}`);
+        if (userRef.kind === "id") {
+          await deps.profileCacheDelete?.(`profile:${userRef.twitchUserId}`);
         }
       } catch (error) {
         await finishSyncRun(pool, runId, {
