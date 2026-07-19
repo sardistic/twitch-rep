@@ -81,7 +81,19 @@ export class RustlogCompatibleProvider implements ChatLogProvider {
           headers: { "user-agent": this.userAgent, accept: "application/json" },
           signal: AbortSignal.timeout(this.timeoutMs),
         });
-        if (response.status === 429 || response.status >= 500) {
+        if (response.status === 429) {
+          // Honor the provider's pacing: wait Retry-After (or 5s per attempt)
+          // before retrying instead of hammering with quick retries.
+          const retryAfter = Number(response.headers.get("retry-after"));
+          const waitMs =
+            Number.isFinite(retryAfter) && retryAfter > 0
+              ? Math.min(retryAfter * 1000, 30_000)
+              : 5_000 * (attempt + 1);
+          lastError = new Error("provider returned 429 (rate limited)");
+          await new Promise((r) => setTimeout(r, waitMs));
+          continue;
+        }
+        if (response.status >= 500) {
           lastError = new Error(`provider returned ${response.status}`);
           continue;
         }

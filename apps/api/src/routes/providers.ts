@@ -122,7 +122,9 @@ export function registerProviderRoutes(app: FastifyInstance, deps: ServerDeps): 
   };
 
   const ENRICH_TTL_SECONDS = 60 * 60;
-  const ENRICH_CONCURRENCY = 4;
+  // Serial with spacing: public log instances rate-limit per IP aggressively.
+  const ENRICH_CONCURRENCY = 1;
+  const ENRICH_SPACING_MS = 350;
   const runningEnrich = new Set<string>();
 
   async function runEnrich(twitchUserId: string, actorUserId: string, orgId: string | null) {
@@ -178,19 +180,23 @@ export function registerProviderRoutes(app: FastifyInstance, deps: ServerDeps): 
               progress.written += outcome.written;
               if (outcome.read > 0) progress.channelsWithLogs += 1;
             } catch (error) {
-              failed += 1;
-              progress.failedQueries = failed;
-              progress.lastError = (error as Error).message;
+              const message = (error as Error).message;
+              progress.lastError = message;
               app.log.warn(
-                { provider: record.name, channel: channel.login ?? channel.twitchChannelId, err: progress.lastError },
+                { provider: record.name, channel: channel.login ?? channel.twitchChannelId, err: message },
                 "enrich channel query failed",
               );
-              // A misbehaving provider should not spin through thousands of
-              // failing requests; abandon it after repeated failures.
-              if (failed > 20) queue = [];
+              // Rate limits are pacing feedback, not provider failure — the
+              // adapter already waited; only hard errors count toward abandon.
+              if (!message.includes("429")) {
+                failed += 1;
+                progress.failedQueries = failed;
+                if (failed > 20) queue = [];
+              }
             }
             progress.scanned += 1;
             if (progress.scanned % 25 === 0) await save();
+            await new Promise((r) => setTimeout(r, ENRICH_SPACING_MS));
           }
         };
         await Promise.all(Array.from({ length: ENRICH_CONCURRENCY }, () => worker()));
