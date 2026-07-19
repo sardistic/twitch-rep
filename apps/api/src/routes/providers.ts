@@ -117,10 +117,12 @@ export function registerProviderRoutes(app: FastifyInstance, deps: ServerDeps): 
     written: number;
     startedAt: string;
     error?: string;
+    lastError?: string;
+    failedQueries?: number;
   };
 
   const ENRICH_TTL_SECONDS = 60 * 60;
-  const ENRICH_CONCURRENCY = 10;
+  const ENRICH_CONCURRENCY = 4;
   const runningEnrich = new Set<string>();
 
   async function runEnrich(twitchUserId: string, actorUserId: string, orgId: string | null) {
@@ -175,8 +177,14 @@ export function registerProviderRoutes(app: FastifyInstance, deps: ServerDeps): 
               progress.read += outcome.read;
               progress.written += outcome.written;
               if (outcome.read > 0) progress.channelsWithLogs += 1;
-            } catch {
+            } catch (error) {
               failed += 1;
+              progress.failedQueries = failed;
+              progress.lastError = (error as Error).message;
+              app.log.warn(
+                { provider: record.name, channel: channel.login ?? channel.twitchChannelId, err: progress.lastError },
+                "enrich channel query failed",
+              );
               // A misbehaving provider should not spin through thousands of
               // failing requests; abandon it after repeated failures.
               if (failed > 20) queue = [];
