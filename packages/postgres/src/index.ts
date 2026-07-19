@@ -1,6 +1,7 @@
 export { createPool, checkPostgres, type PostgresPool } from "./client.js";
 export * from "./repositories.js";
 export * from "./notes.js";
+export * from "./providers.js";
 export {
   runMigrations,
   orderMigrations,

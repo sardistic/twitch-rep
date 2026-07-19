@@ -79,6 +79,7 @@ export const DASHBOARD_PAGE = `<!doctype html>
     <div class="tabs">
       <button data-tab="search" class="active">Research</button>
       <button data-tab="channels">Channels</button>
+      <button data-tab="providers">Providers</button>
       <button data-tab="audit">Audit</button>
     </div>
 
@@ -97,6 +98,19 @@ export const DASHBOARD_PAGE = `<!doctype html>
         <span id="connectMsg" class="tiny"></span>
       </div>
       <div id="channelList"></div>
+    </section>
+
+    <section id="tab-providers" style="display:none">
+      <div class="card">
+        <p class="muted">External log providers enrich profiles with historical, cross-channel evidence. Results are always labeled <span class="pill st-external_unverified">external_unverified</span> and never override verified data.</p>
+        <form id="providerForm" style="display:flex;gap:0.5rem;flex-wrap:wrap">
+          <input id="providerName" placeholder="Name (e.g. my rustlog)" required>
+          <input id="providerUrl" style="flex:1;min-width:14rem" placeholder="Base URL (https://logs.example.org)" required>
+          <button class="btn" type="submit">Add provider</button>
+        </form>
+        <span id="providerMsg" class="tiny"></span>
+      </div>
+      <div id="providerList"></div>
     </section>
 
     <section id="tab-audit" style="display:none">
@@ -141,8 +155,9 @@ document.querySelectorAll(".tabs button").forEach(function (btn) {
   btn.addEventListener("click", function () {
     document.querySelectorAll(".tabs button").forEach(function (b) { b.classList.remove("active"); });
     btn.classList.add("active");
-    ["search", "channels", "audit"].forEach(function (t) { $("tab-" + t).style.display = t === btn.dataset.tab ? "block" : "none"; });
+    ["search", "channels", "providers", "audit"].forEach(function (t) { $("tab-" + t).style.display = t === btn.dataset.tab ? "block" : "none"; });
     if (btn.dataset.tab === "channels") loadChannels();
+    if (btn.dataset.tab === "providers") loadProviders();
     if (btn.dataset.tab === "audit") loadAudit();
   });
 });
@@ -326,6 +341,64 @@ $("connectBtn").addEventListener("click", function () {
   api("/v1/channels/connect", { method: "POST" })
     .then(function (data) { $("connectMsg").textContent = "Connected " + data.channel.login + " \\u00b7 " + data.subscription.status; loadChannels(); })
     .catch(function (err) { $("connectMsg").textContent = err.message; });
+});
+
+function loadProviders() {
+  api("/v1/providers").then(function (data) {
+    if (!data.providers.length) { $("providerList").innerHTML = "<p class='muted'>No providers configured. Profiles only include natively ingested channels.</p>"; return; }
+    $("providerList").innerHTML = data.providers.map(function (p) {
+      return "<div class='card' data-id='" + esc(p.id) + "'><b>" + esc(p.name) + "</b> <span class='tiny'>" + esc(p.providerType) + " \\u00b7 " + esc(p.baseUrl || "") + "</span><br>" +
+        "<div style='display:flex;gap:0.4rem;margin-top:0.5rem;flex-wrap:wrap;align-items:center'>" +
+        "<button class='btn ghost small p-test'>Test</button>" +
+        "<input class='p-user' placeholder='user login/id' style='width:9rem'>" +
+        "<input class='p-chan' placeholder='channel login/id' style='width:9rem'>" +
+        "<button class='btn ghost small p-sync'>Import logs</button>" +
+        "<button class='btn ghost small p-del'>Delete</button>" +
+        "<span class='tiny p-msg'></span></div></div>";
+    }).join("");
+    document.querySelectorAll(".p-test").forEach(function (btn) {
+      btn.addEventListener("click", function () {
+        var card = btn.closest(".card"), msg = card.querySelector(".p-msg");
+        msg.textContent = "Testing\\u2026";
+        api("/v1/providers/" + card.dataset.id + "/test", { method: "POST" })
+          .then(function () { msg.textContent = "Connection OK"; })
+          .catch(function (err) { msg.textContent = err.message; });
+      });
+    });
+    document.querySelectorAll(".p-sync").forEach(function (btn) {
+      btn.addEventListener("click", function () {
+        var card = btn.closest(".card"), msg = card.querySelector(".p-msg");
+        var user = card.querySelector(".p-user").value.trim();
+        var chan = card.querySelector(".p-chan").value.trim();
+        if (!user || !chan) { msg.textContent = "Enter user and channel."; return; }
+        msg.textContent = "Importing\\u2026";
+        api("/v1/providers/" + card.dataset.id + "/sync", {
+          method: "POST", headers: { "content-type": "application/json" },
+          body: JSON.stringify({ user: user, channel: chan })
+        }).then(function (data) { msg.textContent = "Read " + data.read + ", imported " + data.written + " new."; })
+          .catch(function (err) { msg.textContent = err.message; });
+      });
+    });
+    document.querySelectorAll(".p-del").forEach(function (btn) {
+      btn.addEventListener("click", function () {
+        var card = btn.closest(".card");
+        if (!confirm("Delete this provider? Already-imported observations are kept.")) return;
+        api("/v1/providers/" + card.dataset.id, { method: "DELETE" })
+          .then(function () { loadProviders(); toast("Provider deleted"); })
+          .catch(function (err) { toast(err.message); });
+      });
+    });
+  }).catch(function (err) { $("providerList").innerHTML = "<p class='muted'>" + esc(err.message) + "</p>"; });
+}
+
+$("providerForm").addEventListener("submit", function (e) {
+  e.preventDefault();
+  $("providerMsg").textContent = "Adding\\u2026";
+  api("/v1/providers", {
+    method: "POST", headers: { "content-type": "application/json" },
+    body: JSON.stringify({ name: $("providerName").value.trim(), providerType: "rustlog", baseUrl: $("providerUrl").value.trim() })
+  }).then(function () { $("providerMsg").textContent = ""; $("providerName").value = ""; $("providerUrl").value = ""; loadProviders(); toast("Provider added"); })
+    .catch(function (err) { $("providerMsg").textContent = err.message; });
 });
 
 function loadAudit() {

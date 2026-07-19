@@ -14,6 +14,7 @@ import { registerChannelRoutes } from "./routes/channels.js";
 import { registerEventSubRoutes } from "./eventsub/routes.js";
 import { registerChatterRoutes } from "./routes/chatters.js";
 import { registerNoteRoutes } from "./routes/notes.js";
+import { registerProviderRoutes } from "./routes/providers.js";
 import { DASHBOARD_PAGE } from "./web/page.js";
 
 export const API_VERSION = "0.1.0";
@@ -30,6 +31,7 @@ export type ServerDeps = {
   getAppUser: (id: string) => Promise<AppUser | null>;
   ingestor: ChatIngestor | null;
   profiles: ProfileService | null;
+  profileCacheDelete?: (key: string) => Promise<void>;
 };
 
 export function buildDefaultGetAppUser(pool: PostgresPool | null) {
@@ -68,6 +70,7 @@ export function buildServer(deps: ServerDeps): FastifyInstance {
   registerEventSubRoutes(app, deps);
   registerChatterRoutes(app, deps);
   registerNoteRoutes(app, deps);
+  registerProviderRoutes(app, deps);
 
   return app;
 }

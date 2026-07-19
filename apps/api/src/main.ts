@@ -65,6 +65,9 @@ const app = buildServer({
       await redis.set(key, value, "EX", ttlSeconds);
     },
   }),
+  profileCacheDelete: async (key) => {
+    await redis.del(key);
+  },
 });
 
 if (!oauthConfig) {
