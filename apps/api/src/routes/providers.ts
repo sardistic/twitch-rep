@@ -170,7 +170,8 @@ export function registerProviderRoutes(app: FastifyInstance, deps: ServerDeps): 
             const channel = queue.shift();
             if (!channel) return;
             try {
-              const outcome = await importFromProvider(record, provider, userRef, channel, 1000);
+              // Role status only needs a handful of recent lines per channel.
+              const outcome = await importFromProvider(record, provider, userRef, channel, 20);
               progress.read += outcome.read;
               progress.written += outcome.written;
               if (outcome.read > 0) progress.channelsWithLogs += 1;

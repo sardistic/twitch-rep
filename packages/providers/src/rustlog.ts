@@ -134,7 +134,11 @@ export class RustlogCompatibleProvider implements ChatLogProvider {
       : `user/${encodeURIComponent(query.user.login ?? "")}`;
     if (userPart === "user/") throw new Error("A user login or id is required");
 
-    const response = await this.request(`${channelPart}/${userPart}?json=1`);
+    // reverse=1&limit=N asks Rustlog for only the newest N lines; services
+    // that ignore the params still work — we slice client-side regardless.
+    const response = await this.request(
+      `${channelPart}/${userPart}?json=1&reverse=1&limit=${Math.max(1, query.limit)}`,
+    );
     if (response.status === 404) return { messages: [] };
     if (!response.ok) throw new Error(`Provider query returned ${response.status}`);
 
