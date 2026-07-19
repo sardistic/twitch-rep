@@ -125,6 +125,9 @@ export function registerProviderRoutes(app: FastifyInstance, deps: ServerDeps): 
   // Serial with spacing: public log instances rate-limit per IP aggressively.
   const ENRICH_CONCURRENCY = 1;
   const ENRICH_SPACING_MS = 350;
+  // Catalogs larger than this (e.g. 287k-channel aggregators) cannot be
+  // brute-scanned politely; fall back to targeted channels instead.
+  const ENRICH_FULL_SCAN_MAX = 5000;
   const runningEnrich = new Set<string>();
 
   async function runEnrich(twitchUserId: string, actorUserId: string, orgId: string | null) {
@@ -149,20 +152,38 @@ export function registerProviderRoutes(app: FastifyInstance, deps: ServerDeps): 
         twitchUserId,
         ...(cachedUser ? { login: cachedUser.login } : {}),
       };
+      // Channels we already know this user appears in (from prior native or
+      // provider evidence) plus the org's watched channels — the targeted set
+      // used for providers whose catalog is too large to scan fully.
+      const targeted = new Map<string, { twitchChannelId?: string; login?: string }>();
+      for (const c of orgId ? await listOrganizationChannels(pool!, orgId) : []) {
+        targeted.set(c.twitchChannelId, { twitchChannelId: c.twitchChannelId, login: c.login });
+      }
+      if (deps.profiles) {
+        try {
+          const known = await deps.profiles.getProfile(twitchUserId);
+          for (const role of known.roles) {
+            targeted.set(role.channel.twitchChannelId, {
+              twitchChannelId: role.channel.twitchChannelId,
+              ...(role.channel.login ? { login: role.channel.login } : {}),
+            });
+          }
+        } catch {
+          // profile unavailable — targeted set stays org-only
+        }
+      }
+
       for (const record of providers) {
         const provider = buildProvider(record);
-        // Scan every channel the provider has logs for; fall back to the
-        // org's watched channels when the service exposes no channel list.
+        // Scan the provider's full catalog when it is small enough to walk
+        // politely; otherwise query only targeted channels.
         let channels: Array<{ twitchChannelId?: string; login?: string }>;
         try {
-          channels = provider.listChannels
-            ? await provider.listChannels()
-            : (await listOrganizationChannels(pool!, orgId ?? "")).map((c) => ({
-                twitchChannelId: c.twitchChannelId,
-                login: c.login,
-              }));
+          const catalog = provider.listChannels ? await provider.listChannels() : null;
+          channels =
+            catalog && catalog.length <= ENRICH_FULL_SCAN_MAX ? catalog : [...targeted.values()];
         } catch {
-          channels = [];
+          channels = [...targeted.values()];
         }
         progress.total += channels.length;
         await save();
