@@ -1,11 +1,15 @@
 import type { FastifyInstance } from "fastify";
 import { apiError } from "@chatterscope/contracts";
+import { z } from "zod";
+import { parseUserSearchInput } from "@chatterscope/auth";
 import {
   connectOrganizationChannel,
   getMembershipsForUser,
   listOrganizationChannels,
   recordAuditEvent,
+  setOrganizationChannelEnabled,
   upsertTwitchChannel,
+  upsertTwitchUser,
 } from "@chatterscope/postgres";
 import { requireSession } from "../plugins/auth-guard.js";
 import type { ServerDeps } from "../server.js";
@@ -27,6 +31,107 @@ export function registerChannelRoutes(app: FastifyInstance, deps: ServerDeps): v
     );
     return reply.send({ organizations: channels });
   });
+
+  /**
+   * Watches any public channel via anonymous IRC — no broadcaster
+   * authorization needed for public chat observation. Admin-only.
+   */
+  app.post("/v1/channels/watch", { preHandler: requireSession(deps) }, async (request, reply) => {
+    if (!pool) {
+      return reply.status(503).send(apiError("DATABASE_UNAVAILABLE", "Database not configured."));
+    }
+    if (!twitch) {
+      return reply
+        .status(503)
+        .send(apiError("TWITCH_NOT_CONFIGURED", "Twitch API is required to resolve channels."));
+    }
+    const parsed = z.object({ channel: z.string().min(1) }).safeParse(request.body);
+    const ref = parsed.success ? parseUserSearchInput(parsed.data.channel) : null;
+    if (!ref) {
+      return reply
+        .status(400)
+        .send(apiError("INVALID_INPUT", "Provide a channel login, URL, or numeric ID."));
+    }
+    const memberships = await getMembershipsForUser(pool, request.session!.appUserId);
+    const admin = memberships.find((m) => m.role === "owner" || m.role === "admin");
+    if (!admin) {
+      return reply
+        .status(403)
+        .send(apiError("FORBIDDEN", "Only owners and admins may watch channels."));
+    }
+    const helixUser =
+      ref.kind === "id"
+        ? await twitch.getUserById(ref.twitchUserId)
+        : await twitch.getUserByLogin(ref.login);
+    if (!helixUser) {
+      return reply.status(404).send(apiError("USER_NOT_FOUND", "No such Twitch channel."));
+    }
+
+    await upsertTwitchUser(pool, {
+      twitchUserId: helixUser.twitchUserId,
+      login: helixUser.login,
+      displayName: helixUser.displayName,
+      accountCreatedAt: helixUser.accountCreatedAt,
+      profileImageUrl: helixUser.profileImageUrl,
+      broadcasterType: helixUser.broadcasterType,
+      description: helixUser.description,
+    });
+    await upsertTwitchChannel(pool, {
+      twitchChannelId: helixUser.twitchUserId,
+      login: helixUser.login,
+      displayName: helixUser.displayName,
+    });
+    await connectOrganizationChannel(
+      pool,
+      admin.organizationId,
+      helixUser.twitchUserId,
+      request.session!.appUserId,
+    );
+    deps.watchChannel?.(helixUser.login);
+    await recordAuditEvent(pool, {
+      organizationId: admin.organizationId,
+      actorUserId: request.session!.appUserId,
+      action: "channel.watch",
+      targetType: "twitch_channel",
+      targetId: helixUser.twitchUserId,
+    });
+    return reply.send({
+      channel: { twitchChannelId: helixUser.twitchUserId, login: helixUser.login },
+      transport: "irc",
+    });
+  });
+
+  app.delete<{ Params: { twitchChannelId: string } }>(
+    "/v1/channels/:twitchChannelId",
+    { preHandler: requireSession(deps) },
+    async (request, reply) => {
+      if (!pool) {
+        return reply.status(503).send(apiError("DATABASE_UNAVAILABLE", "Database not configured."));
+      }
+      const memberships = await getMembershipsForUser(pool, request.session!.appUserId);
+      const adminOrgs = memberships
+        .filter((m) => m.role === "owner" || m.role === "admin")
+        .map((m) => m.organizationId);
+      const disabled = await setOrganizationChannelEnabled(
+        pool,
+        adminOrgs,
+        request.params.twitchChannelId,
+        false,
+      );
+      if (!disabled) {
+        return reply.status(404).send(apiError("NOT_FOUND", "Channel not found in your orgs."));
+      }
+      deps.unwatchChannelById?.(request.params.twitchChannelId);
+      await recordAuditEvent(pool, {
+        organizationId: null,
+        actorUserId: request.session!.appUserId,
+        action: "channel.unwatch",
+        targetType: "twitch_channel",
+        targetId: request.params.twitchChannelId,
+      });
+      return reply.send({ ok: true });
+    },
+  );
 
   /**
    * Connects the signed-in user's own channel: registers it for the user's

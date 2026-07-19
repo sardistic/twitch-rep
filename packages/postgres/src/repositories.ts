@@ -319,6 +319,50 @@ export async function listOrganizationChannels(
   }));
 }
 
+/**
+ * Light identity upsert from chat observations: refreshes login/display name
+ * without clobbering richer fields fetched from the Twitch API.
+ */
+export async function upsertTwitchUserIdentity(
+  pool: PostgresPool,
+  identity: { twitchUserId: string; login: string; displayName: string },
+): Promise<void> {
+  await pool.query(
+    `INSERT INTO twitch_users (twitch_user_id, login, display_name, fetched_at)
+     VALUES ($1, $2, $3, to_timestamp(0))
+     ON CONFLICT (twitch_user_id) DO UPDATE SET
+       login = EXCLUDED.login,
+       display_name = EXCLUDED.display_name,
+       updated_at = now()`,
+    [identity.twitchUserId, identity.login, identity.displayName],
+  );
+}
+
+/** Logins of every enabled channel across all organizations (ingest watch list). */
+export async function listAllEnabledChannelLogins(pool: PostgresPool): Promise<string[]> {
+  const result = await pool.query<{ login: string }>(
+    `SELECT DISTINCT c.login
+     FROM organization_channels oc
+     JOIN twitch_channels c ON c.twitch_channel_id = oc.twitch_channel_id
+     WHERE oc.enabled = true`,
+  );
+  return result.rows.map((row) => row.login);
+}
+
+export async function setOrganizationChannelEnabled(
+  pool: PostgresPool,
+  organizationIds: string[],
+  twitchChannelId: string,
+  enabled: boolean,
+): Promise<boolean> {
+  const result = await pool.query(
+    `UPDATE organization_channels SET enabled = $3
+     WHERE organization_id = ANY($1) AND twitch_channel_id = $2`,
+    [organizationIds, twitchChannelId, enabled],
+  );
+  return (result.rowCount ?? 0) > 0;
+}
+
 export type VerifiedAssertionRow = {
   twitchChannelId: string;
   roleName: string;

@@ -8,6 +8,13 @@ import { RedisSessionStore } from "./auth/session.js";
 import { HelixClient } from "./twitch/client.js";
 import { ChatIngestor, RedisDedupStore } from "./eventsub/ingest.js";
 import { DefaultProfileService } from "./services/profile.js";
+import { TwitchIrcClient } from "./irc/client.js";
+import {
+  listAllEnabledChannelLogins,
+  upsertTwitchUserIdentity,
+  upsertTwitchChannel,
+  getChannelMeta,
+} from "@chatterscope/postgres";
 
 loadDotenv();
 
@@ -41,6 +48,52 @@ const oauthConfig: TwitchOAuthConfig | null =
       }
     : null;
 
+const ingestor = new ChatIngestor(clickhouse, env.CLICKHOUSE_DATABASE, new RedisDedupStore(redis));
+
+// Identity cache upserts are throttled to once per user/channel per hour to
+// avoid a Postgres write per chat line.
+const seenIdentities = new Map<string, number>();
+function shouldUpsert(key: string): boolean {
+  const now = Date.now();
+  const last = seenIdentities.get(key);
+  if (last && now - last < 60 * 60 * 1000) return false;
+  seenIdentities.set(key, now);
+  if (seenIdentities.size > 50_000) seenIdentities.clear();
+  return true;
+}
+
+const irc = new TwitchIrcClient({
+  onMessage: (message, channelLogin) => {
+    void (async () => {
+      try {
+        await ingestor.ingest(message);
+        if (shouldUpsert(`u:${message.twitchUserId}`)) {
+          await upsertTwitchUserIdentity(pool, {
+            twitchUserId: message.twitchUserId,
+            login: message.userLogin,
+            displayName: message.displayName,
+          });
+        }
+        if (shouldUpsert(`c:${message.twitchChannelId}`)) {
+          await upsertTwitchChannel(pool, {
+            twitchChannelId: message.twitchChannelId,
+            login: channelLogin,
+            displayName: channelLogin,
+          });
+        }
+        await redis.del(`profile:${message.twitchUserId}`);
+      } catch (error) {
+        app.log.error({ err: error }, "irc ingest failed");
+      }
+    })();
+  },
+  onLog: (level, event, detail) => {
+    // app may not be constructed yet on the first connect attempt
+    // eslint-disable-next-line @typescript-eslint/no-use-before-define
+    app?.log[level]({ irc: detail }, event);
+  },
+});
+
 const app = buildServer({
   env,
   checks: {
@@ -58,7 +111,7 @@ const app = buildServer({
   encryptionKey: deriveKey(env.ENCRYPTION_KEY!),
   fetchImpl: fetch,
   getAppUser: buildDefaultGetAppUser(pool),
-  ingestor: new ChatIngestor(clickhouse, env.CLICKHOUSE_DATABASE, new RedisDedupStore(redis)),
+  ingestor,
   profiles: new DefaultProfileService(pool, clickhouse, env.CLICKHOUSE_DATABASE, {
     get: (key) => redis.get(key),
     set: async (key, value, ttlSeconds) => {
@@ -68,6 +121,13 @@ const app = buildServer({
   profileCacheDelete: async (key) => {
     await redis.del(key);
   },
+  watchChannel: (login) => irc.join(login),
+  unwatchChannelById: (twitchChannelId) => {
+    void getChannelMeta(pool, [twitchChannelId]).then((meta) => {
+      const channel = meta.get(twitchChannelId);
+      if (channel) irc.part(channel.login);
+    });
+  },
 });
 
 if (!oauthConfig) {
@@ -76,6 +136,7 @@ if (!oauthConfig) {
 
 async function shutdown(signal: string): Promise<void> {
   app.log.info({ signal }, "shutting down");
+  irc.stop();
   await app.close();
   await Promise.allSettled([pool.end(), clickhouse.close(), redis.quit()]);
   process.exit(0);
@@ -86,6 +147,9 @@ process.on("SIGTERM", () => void shutdown("SIGTERM"));
 
 try {
   await app.listen({ port: env.API_PORT, host: "0.0.0.0" });
+  const watchList = await listAllEnabledChannelLogins(pool);
+  irc.start(watchList);
+  app.log.info({ channels: watchList }, "irc watch list loaded");
 } catch (error) {
   app.log.error(error, "failed to start API server");
   process.exit(1);

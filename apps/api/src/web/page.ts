@@ -93,8 +93,16 @@ export const DASHBOARD_PAGE = `<!doctype html>
 
     <section id="tab-channels" style="display:none">
       <div class="card">
-        <p class="muted">Connected channels feed chat ingestion. Only owners/admins can connect. Connecting subscribes to your own channel's chat via EventSub.</p>
-        <button id="connectBtn" class="btn">Connect my channel</button>
+        <p class="muted">Watch any public Twitch channel &mdash; chat is observed over anonymous IRC (no broadcaster authorization needed). Badges seen in watched channels become role evidence for anyone who chats there.</p>
+        <form id="watchForm" style="display:flex;gap:0.5rem;flex-wrap:wrap">
+          <input id="watchInput" style="flex:1;min-width:12rem" placeholder="Channel login, URL, or ID">
+          <button class="btn" type="submit">Watch channel</button>
+        </form>
+        <span id="watchMsg" class="tiny"></span>
+      </div>
+      <div class="card">
+        <p class="muted">Optionally, connect your own channel over EventSub webhooks (uses your Twitch authorization instead of IRC).</p>
+        <button id="connectBtn" class="btn ghost">Connect my channel (EventSub)</button>
         <span id="connectMsg" class="tiny"></span>
       </div>
       <div id="channelList"></div>
@@ -335,6 +343,21 @@ function loadChannels() {
     }).join("");
   }).catch(function (err) { $("channelList").innerHTML = "<p class='muted'>" + esc(err.message) + "</p>"; });
 }
+
+$("watchForm").addEventListener("submit", function (e) {
+  e.preventDefault();
+  var channel = $("watchInput").value.trim();
+  if (!channel) return;
+  $("watchMsg").textContent = "Adding\\u2026";
+  api("/v1/channels/watch", {
+    method: "POST", headers: { "content-type": "application/json" },
+    body: JSON.stringify({ channel: channel })
+  }).then(function (data) {
+    $("watchMsg").textContent = "Now watching " + data.channel.login + " via IRC.";
+    $("watchInput").value = "";
+    loadChannels();
+  }).catch(function (err) { $("watchMsg").textContent = err.message; });
+});
 
 $("connectBtn").addEventListener("click", function () {
   $("connectMsg").textContent = "Connecting\\u2026";

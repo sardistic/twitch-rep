@@ -32,6 +32,8 @@ export type ServerDeps = {
   ingestor: ChatIngestor | null;
   profiles: ProfileService | null;
   profileCacheDelete?: (key: string) => Promise<void>;
+  watchChannel?: (login: string) => void;
+  unwatchChannelById?: (twitchChannelId: string) => void;
 };
 
 export function buildDefaultGetAppUser(pool: PostgresPool | null) {
